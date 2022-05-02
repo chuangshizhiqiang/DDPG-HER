@@ -26,12 +26,12 @@ LEARNING_RATE_A = 0.001                    # learning rate for actor
 LEARNING_RATE_C = 0.001                    # learning rate for critic
 GAMMA = 0.9                                # reward discount
 TAU = 0.01                                 # soft replacement
-BATCH_SIZE = 32                            # update batchsize
-TRAIN_CYCLES = 500                         # MAX training times
+BATCH_SIZE = 256                           # update batchsize
+TRAIN_CYCLES = 200                         # MAX training times
 EACH_TRAIN_UPDATE_TIME = 100               # every time TRAIN update time
-MAX_EPISODES = 100                         # number of episodes for training
-MAX_EPISODE_STEPS = 200                    # number of steps for each episode
-MEMORY_CAPACITY = MAX_EPISODES             # replay buffer size
+PRE_FILL_EPISODES = 300                    # number of episodes for training
+MAX_EPISODE_STEPS = 50                     # number of steps for each episode
+MEMORY_CAPACITY = 500                      # replay buffer size
 TEST_EPISODES = 5                          # test the model per episodes
 ACTION_VARIANCE = 3                        # control exploration
 MAX_TEST_STEPS = 100                       # TRAIN steps
@@ -46,6 +46,15 @@ P_FUTURE = 1 - (1. / (1 + K_FUTURE))
 ##########################################################################################################
 # Base Class
 ##########################################################################################################
+class Normalizer(object):
+    def __init__(self, range):
+        pass
+
+    def update(self):
+        pass
+
+    def normalize(self):
+        pass
 
 ##########################################################################################################
 # Agent class
@@ -94,12 +103,14 @@ class DDPG(object):
         actor_state_input_layer = Input(shape=(self.state_number), name="actor_state_input_layer")
         actor_goal_input_layer = Input(shape=(self.goal_number), name="actor_goal_input_layer")
         input = Concatenate()([actor_state_input_layer, actor_goal_input_layer])
-        fc1 = Dense(units=30, activation="relu", kernel_initializer=w_init, bias_initializer=b_init,
+        fc1 = Dense(units=256, activation="relu", kernel_initializer=w_init, bias_initializer=b_init,
                     name="actor_fc1_layer")(input)
-        fc2 = Dense(units=30, activation="relu", kernel_initializer=w_init, bias_initializer=b_init,
+        fc2 = Dense(units=256, activation="relu", kernel_initializer=w_init, bias_initializer=b_init,
                     name="actor_fc2_layer")(fc1)
+        fc3 = Dense(units=256, activation="relu", kernel_initializer=w_init, bias_initializer=b_init,
+                    name="actor_fc3_layer")(fc2)
         output = Dense(units=self.action_number, activation="tanh", kernel_initializer=w_init, bias_initializer=b_init,
-                       name="actor_fc3_layer")(fc2)
+                       name="actor_output_layer")(fc3)
 
         model = Model(inputs=[actor_state_input_layer, actor_goal_input_layer], outputs=output)
         # model.summary()
@@ -115,14 +126,21 @@ class DDPG(object):
         critic_action_input_layer = Input(shape=(self.action_number), name="critic_action_input_layer")
         critic_goal_input_layer = Input(shape=(self.goal_number), name="critic_goal_input_layer")
         input = Concatenate()([critic_state_input_layer, critic_action_input_layer, critic_goal_input_layer])
-        fc1 = Dense(units=60, activation="relu", kernel_initializer=w_init, bias_initializer=b_init,
+        fc1 = Dense(units=256, activation="relu", kernel_initializer=w_init, bias_initializer=b_init,
                     name="critic_fc1_layer")(input)
-        output = Dense(units=1, kernel_initializer=w_init, bias_initializer=b_init, name="critic_output_layer")(fc1)
+        fc2 = Dense(units=256, activation="relu", kernel_initializer=w_init, bias_initializer=b_init,
+                    name="critic_fc2_layer")(fc1)
+        fc3 = Dense(units=256, activation="relu", kernel_initializer=w_init, bias_initializer=b_init,
+                    name="critic_fc3_layer")(fc2)
+        output = Dense(units=1, kernel_initializer=w_init, bias_initializer=b_init, name="critic_output_layer")(fc3)
 
         model = Model(inputs=[critic_state_input_layer, critic_action_input_layer, critic_goal_input_layer], outputs=output)
         # model.summary()
         # plot_model(model, show_shapes=True)
         return model
+
+    def __normalize_goal(self, data:list):
+        pass
 
     def __set_model_2_eval_model(self, model):
         for layer in model.layers:
@@ -131,6 +149,7 @@ class DDPG(object):
     def __set_model_2_train_model(self, model):
         for layer in model.layers:
             layer.trainable = True
+
     # 更新参数
     def __copy_para(self, from_model, to_model):
         for i, j in zip(from_model.trainable_weights, to_model.trainable_weights):
@@ -395,7 +414,7 @@ if __name__ == '__main__':
         exit()
 
     # pre-fill replay-buffer
-    for _ in range(MAX_EPISODES):
+    for _ in range(PRE_FILL_EPISODES):
         episode = generate_episode(agent, env)
         agent.store_2_replay_buffer(episode)
 
