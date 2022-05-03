@@ -28,7 +28,7 @@ GAMMA = 0.9                                # reward discount
 TAU = 0.01                                 # soft replacement
 BATCH_SIZE = 256                           # update batchsize
 TRAIN_CYCLES = 200                         # MAX training times
-EACH_TRAIN_UPDATE_TIME = 100               # every time TRAIN update time
+EACH_TRAIN_UPDATE_TIME = 50                # every time TRAIN update time
 PRE_FILL_EPISODES = 300                    # number of episodes for training
 MAX_EPISODE_STEPS = 50                     # number of steps for each episode
 MEMORY_CAPACITY = 500                      # replay buffer size
@@ -188,7 +188,7 @@ class DDPG(object):
 
     def save_results(self, epoch):
         now = datetime.now()  # current date and time
-        date_time = now.strftime("%Y-%m-%d %H:%M")
+        date_time = now.strftime("%Y-%m-%d %H:%M:%S.%f")
         model_checkpoint_folder = self.get_result_folders()
 
         filepaths = {}
@@ -228,7 +228,7 @@ class DDPG(object):
     def folder_file_sort(self, files):
         file_dts = []
         for file_name in files:
-            file_dts.append(datetime.strptime(file_name[-21:-5], '%Y-%m-%d %H:%M').timestamp())
+            file_dts.append(datetime.strptime(file_name[-31:-5], '%Y-%m-%d %H:%M:%S.%f').timestamp())
         file_dts = np.array(file_dts)
         file_dts_idx = np.argsort(file_dts)
         return file_dts_idx
@@ -296,8 +296,8 @@ class DDPG(object):
 
         future_ag = []
         for episode, f_offset in zip(episode_indices[her_indices], future_time):
-            if f_offset == 200:
-                f_offset = 199
+            if f_offset == MAX_EPISODE_STEPS:
+                f_offset = MAX_EPISODE_STEPS - 1
             future_ag.append(deepcopy(self.replay_buffer[episode][f_offset][6]))
         future_ag = np.vstack(future_ag)
 
@@ -336,6 +336,8 @@ class DDPG(object):
         a_grads = tape.gradient(a_loss, self.actor.trainable_weights)
         self.actor_opt.apply_gradients(zip(a_grads, self.actor.trainable_weights))
 
+
+    def sync_network(self):
         """
         滑动平均更新
         """
@@ -425,7 +427,10 @@ if __name__ == '__main__':
 
         episode = generate_episode(agent, env)
         agent.store_2_replay_buffer(episode)
-        agent.train(env)
+        for _ in range(EACH_TRAIN_UPDATE_TIME):
+            agent.train(env)
+
+        agent.sync_network()
         # store agent train results
         agent.save_results(train_cycle)
 
