@@ -1,3 +1,4 @@
+import json
 import os
 import time
 import gym
@@ -13,7 +14,7 @@ from keras.layers import Input, Dense, Concatenate, Lambda
 # from keras.utils import plot_model
 from datetime import datetime
 
-
+from normalizer import Normalizer
 # DDPG(deep deterministic policy gradient) + HER sparse rewards
 ##########################################################################################################
 # Config
@@ -25,18 +26,19 @@ RANDOMSEED = 1                             # random seed
 LEARNING_RATE_A = 0.001                    # learning rate for actor
 LEARNING_RATE_C = 0.001                    # learning rate for critic
 GAMMA = 0.9                                # reward discount
-TAU = 0.01                                 # soft replacement
+TAU = 0.05                                 # soft replacement
 BATCH_SIZE = 256                           # update batchsize
-TRAIN_CYCLES = 200                         # MAX training times
+TRAIN_CYCLES = 1000                        # MAX training times
 EACH_TRAIN_UPDATE_TIME = 50                # every time TRAIN update time
 PRE_FILL_EPISODES = 300                    # number of episodes for training
 MAX_EPISODE_STEPS = 50                     # number of steps for each episode
-MEMORY_CAPACITY = 500                      # replay buffer size
+MEMORY_CAPACITY = 7e+5 // 50               # replay buffer size
 TEST_EPISODES = 5                          # test the model per episodes
 ACTION_VARIANCE = 3                        # control exploration
 MAX_TEST_STEPS = 100                       # TRAIN steps
-
-PLAY_MODEL = False
+ADD_NEW_EPISODE = 2
+PLAY_MODEL = True
+CONTINUE_TRAIN = False
 
 # replay_k (int): the ratio between HER replays and regular replays (e.g. k = 4 -> 4 times
 # as many HER replays as regular replays are used)
@@ -46,15 +48,15 @@ P_FUTURE = 1 - (1. / (1 + K_FUTURE))
 ##########################################################################################################
 # Base Class
 ##########################################################################################################
-class Normalizer(object):
-    def __init__(self, range):
-        pass
-
-    def update(self):
-        pass
-
-    def normalize(self):
-        pass
+# class Normalizer(object):
+#     def __init__(self, range):
+#         pass
+#
+#     def update(self):
+#         pass
+#
+#     def normalize(self):
+#         pass
 
 ##########################################################################################################
 # Agent class
@@ -68,8 +70,6 @@ class DDPG(object):
         # replay_buffer 用于储存跑的数据的数组：
         # 保存 (MEMORY_CAPACITY，[state, action, desired_goal, reward, next_state, next_achieved_goal, achieved_goal])
         self.replay_buffer        = []
-        self.replay_buffer_point  = 0
-        self.replay_buffer_remain = MEMORY_CAPACITY
         self.action_number        = action_number
         self.state_number         = state_number
         self.action_bound         = action_bound
@@ -92,26 +92,23 @@ class DDPG(object):
         self.actor_opt = tf.keras.optimizers.Adam(LEARNING_RATE_A)
         self.critic_opt = tf.keras.optimizers.Adam(LEARNING_RATE_C)
 
+        self.state_normalizer = Normalizer(self.state_number, default_clip_range=5)
+        self.goal_normalizer = Normalizer(self.goal_number, default_clip_range=5)
+
         # 建立ema(exponential moving average)，滑动平均值, decay 旧平均值的比例, like polyak-averaged
         self.ema = tf.train.ExponentialMovingAverage(decay=1 - TAU)  # soft replacement
 
+        self.save_weight_index = 0
+
     # 建立actor网络，输入s，输出a
     def create_actor(self):
-        w_init = keras.initializers.RandomNormal(mean=0.0, stddev=0.05)
-        b_init = keras.initializers.Constant(0.1)
-
-        actor_state_input_layer = Input(shape=(self.state_number), name="actor_state_input_layer")
-        actor_goal_input_layer = Input(shape=(self.goal_number), name="actor_goal_input_layer")
+        actor_state_input_layer = Input(shape=(self.state_number))
+        actor_goal_input_layer = Input(shape=(self.goal_number))
         input = Concatenate()([actor_state_input_layer, actor_goal_input_layer])
-        fc1 = Dense(units=256, activation="relu", kernel_initializer=w_init, bias_initializer=b_init,
-                    name="actor_fc1_layer")(input)
-        fc2 = Dense(units=256, activation="relu", kernel_initializer=w_init, bias_initializer=b_init,
-                    name="actor_fc2_layer")(fc1)
-        fc3 = Dense(units=256, activation="relu", kernel_initializer=w_init, bias_initializer=b_init,
-                    name="actor_fc3_layer")(fc2)
-        output = Dense(units=self.action_number, activation="tanh", kernel_initializer=w_init, bias_initializer=b_init,
-                       name="actor_output_layer")(fc3)
-
+        fc1 = Dense(units=256, activation="relu")(input)
+        fc2 = Dense(units=256, activation="relu")(fc1)
+        fc3 = Dense(units=256, activation="relu")(fc2)
+        output = Dense(units=self.action_number, activation="tanh")(fc3)
         model = Model(inputs=[actor_state_input_layer, actor_goal_input_layer], outputs=output)
         # model.summary()
         # plot_model(model, show_shapes=True)
@@ -119,28 +116,18 @@ class DDPG(object):
 
     # 建立Critic网络，输入s，a。输出 Q 值
     def create_critic(self):
-        w_init = keras.initializers.RandomNormal(mean=0.0, stddev=0.05)
-        b_init = keras.initializers.Constant(0.1)
-
-        critic_state_input_layer = Input(shape=(self.state_number), name="critic_state_input_layer")
-        critic_action_input_layer = Input(shape=(self.action_number), name="critic_action_input_layer")
-        critic_goal_input_layer = Input(shape=(self.goal_number), name="critic_goal_input_layer")
-        input = Concatenate()([critic_state_input_layer, critic_action_input_layer, critic_goal_input_layer])
-        fc1 = Dense(units=256, activation="relu", kernel_initializer=w_init, bias_initializer=b_init,
-                    name="critic_fc1_layer")(input)
-        fc2 = Dense(units=256, activation="relu", kernel_initializer=w_init, bias_initializer=b_init,
-                    name="critic_fc2_layer")(fc1)
-        fc3 = Dense(units=256, activation="relu", kernel_initializer=w_init, bias_initializer=b_init,
-                    name="critic_fc3_layer")(fc2)
-        output = Dense(units=1, kernel_initializer=w_init, bias_initializer=b_init, name="critic_output_layer")(fc3)
-
-        model = Model(inputs=[critic_state_input_layer, critic_action_input_layer, critic_goal_input_layer], outputs=output)
+        i_state = Input(shape=(self.state_number))
+        i_action = Input(shape=(self.action_number))
+        i_goal = Input(shape=(self.goal_number))
+        input = Concatenate()([i_state, i_action, i_goal])
+        fc1 = Dense(units=256, activation="relu")(input)
+        fc2 = Dense(units=256, activation="relu")(fc1)
+        fc3 = Dense(units=256, activation="relu")(fc2)
+        output = Dense(units=1)(fc3)
+        model = Model(inputs=[i_state, i_action, i_goal], outputs=output)
         # model.summary()
         # plot_model(model, show_shapes=True)
         return model
-
-    def __normalize_goal(self, data:list):
-        pass
 
     def __set_model_2_eval_model(self, model):
         for layer in model.layers:
@@ -159,15 +146,17 @@ class DDPG(object):
         return np.clip(x, -200, 200)
 
     def store_2_replay_buffer(self, episode:list):
-        step = deepcopy(episode)
-        if self.replay_buffer_remain > 0:
-            self.replay_buffer_remain -= 1
-            self.replay_buffer.append(step)
-        else:
-            self.replay_buffer[self.replay_buffer_point] = episode
-        self.replay_buffer_point = (self.replay_buffer_point + 1) % MEMORY_CAPACITY
+        self.replay_buffer.append(deepcopy(episode))
+        if len(self.replay_buffer) > MEMORY_CAPACITY:
+            self.replay_buffer.pop(0)
+
+        self.update_normallizer()
 
     def choose_action_train(self, state, goal):
+
+        state = self.state_normalizer.normalize(state)
+        goal = self.goal_normalizer.normalize(goal)
+
         state = state.reshape((1, -1))
         goal  = goal.reshape((1, -1))
 
@@ -179,6 +168,9 @@ class DDPG(object):
         return action
 
     def choose_action(self, state, goal):
+        state = self.state_normalizer.normalize(state)
+        goal = self.goal_normalizer.normalize(goal)
+
         state = state.reshape((1, -1))
         goal  = goal.reshape((1, -1))
         a = self.actor([state, goal])
@@ -266,7 +258,7 @@ class DDPG(object):
         states = []
         actions = []
         desired_goals = []
-        rewards = []
+        # rewards = []
         next_states = []
         next_achieved_goal = []
         achieved_goal = []
@@ -277,10 +269,16 @@ class DDPG(object):
             states.append(deepcopy(self.replay_buffer[episode][timestep][0]))
             actions.append(deepcopy(self.replay_buffer[episode][timestep][1]))
             desired_goals.append(deepcopy(self.replay_buffer[episode][timestep][2]))
-            rewards.append(deepcopy(self.replay_buffer[episode][timestep][3]))
+            # rewards.append(deepcopy(self.replay_buffer[episode][timestep][3]))
             next_states.append(deepcopy(self.replay_buffer[episode][timestep][4]))
             next_achieved_goal.append(deepcopy(self.replay_buffer[episode][timestep][5]))
             achieved_goal.append(deepcopy(self.replay_buffer[episode][timestep][6]))
+
+        states = self.state_normalizer.normalize(states)
+        desired_goals = self.goal_normalizer.normalize(desired_goals)
+        next_states = self.state_normalizer.normalize(next_states)
+        next_achieved_goal = self.goal_normalizer.normalize(next_achieved_goal)
+        achieved_goal = self.goal_normalizer.normalize(achieved_goal)
 
         states = np.vstack(states)
         actions = np.vstack(actions)
@@ -304,6 +302,10 @@ class DDPG(object):
         desired_goals[her_indices] = future_ag
         rewards = np.expand_dims(env.compute_reward(next_achieved_goal, desired_goals, None), 1)
 
+        # if next_achieved_goal.shape == desired_goals.shape:
+        #     rewards = np.linalg.norm(next_achieved_goal - desired_goals, axis=-1)
+        # rewards = np.expand_dims(rewards, 1)
+
         states = self.__clip_obs(states)
         next_states = self.__clip_obs(next_states)
         desired_goals = self.__clip_obs(desired_goals)
@@ -314,10 +316,10 @@ class DDPG(object):
         # br + GAMMA * q_
         # loss = (y - q)^2
         with tf.GradientTape() as tape:
-            action_next = self.actor_target([next_states, desired_goals])
+            action_next = self.actor_target([next_states, desired_goals], training=False)
             # action_next = np.clip(np.random.normal(action_next, ACTION_VARIANCE), self.action_bound[0],
             #                       self.action_bound[1])
-            q_value_next = self.critic_target([next_states, action_next, desired_goals])
+            q_value_next = self.critic_target([next_states, action_next, desired_goals], training=False)
             y = rewards + self.gamma * q_value_next
 
             q_value = self.critic([states, actions, desired_goals])
@@ -329,12 +331,18 @@ class DDPG(object):
         # Actor的目标就是获取最多Q值的。
         # Exception
         with tf.GradientTape() as tape:
-            action = self.actor([states, desired_goals])
+            action = self.actor([states, desired_goals], training=False)
             # action = np.clip(np.random.normal(action, ACTION_VARIANCE), self.action_bound[0], self.action_bound[1])
-            q_value_next = self.critic([states, action, desired_goals])
-            a_loss = -tf.reduce_mean(q_value_next)
+            q_value = self.critic([states, action, desired_goals], training=False)
+            a_loss = -tf.reduce_mean(q_value) + np.mean(np.array(action) ** 2)
+            # a_loss = -np.mean(self.critic([states, action, desired_goals]))
+            # a_loss += (np.array(action[0]) ** 2).mean()
         a_grads = tape.gradient(a_loss, self.actor.trainable_weights)
         self.actor_opt.apply_gradients(zip(a_grads, self.actor.trainable_weights))
+
+        c_error = np.mean(td_error)
+        a_error = np.mean(a_loss)
+        return c_error, a_error
 
 
     def sync_network(self):
@@ -346,6 +354,52 @@ class DDPG(object):
         self.ema.apply(paras)  # 主要是建立影子参数, update shadow_variables
         for i, j in zip(self.actor_target.trainable_weights + self.critic_target.trainable_weights, paras):
             i.assign(self.ema.average(j))  # 用滑动平均赋值
+
+    def update_normallizer(self):
+        episode_indices = np.random.randint(0, len(self.replay_buffer), BATCH_SIZE)
+        time_indices = np.random.randint(0, MAX_EPISODE_STEPS, BATCH_SIZE)
+
+        states = []
+        desired_goals = []
+
+        # 做切片
+        for episode, timestep in zip(episode_indices, time_indices):
+            # [state, action, desired_goal, reward, next_state, next_achieved_goal, achieved_goal]
+            states.append(deepcopy(self.replay_buffer[episode][timestep][0]))
+            desired_goals.append(deepcopy(self.replay_buffer[episode][timestep][2]))
+
+        states = np.vstack(states)
+        desired_goals = np.vstack(desired_goals)
+
+        her_indices = np.where(np.random.uniform(size=BATCH_SIZE) < P_FUTURE)
+        future_offset = np.random.uniform(size=BATCH_SIZE) * (MAX_EPISODE_STEPS - time_indices)
+        future_offset = future_offset.astype(int)
+        future_time = (time_indices + 1 + future_offset)[her_indices]
+
+        future_ag = []
+        for episode, f_offset in zip(episode_indices[her_indices], future_time):
+            if f_offset == MAX_EPISODE_STEPS:
+                f_offset = MAX_EPISODE_STEPS - 1
+            future_ag.append(deepcopy(self.replay_buffer[episode][f_offset][6]))
+        future_ag = np.vstack(future_ag)
+
+        desired_goals[her_indices] = future_ag
+
+        self.state_normalizer.update(states)
+        self.goal_normalizer.update(desired_goals)
+        self.state_normalizer.recompute_stats()
+        self.goal_normalizer.recompute_stats()
+
+    def save_weight_2_file(self):
+        a_w = self.actor.get_weights()
+        c_w = self.actor.get_weights()
+        with open("./weight/a_{}.txt".format(self.save_weight_index), "w") as w:
+            for i in a_w:
+                w.write(json.dumps(i.tolist()))
+        with open("./weight/c_{}.txt".format(self.save_weight_index), "w") as w:
+            for i in c_w:
+                w.write(json.dumps(i.tolist()))
+        self.save_weight_index += 1
 
 
 ##########################################################################################################
@@ -396,6 +450,10 @@ if __name__ == '__main__':
     goal_number   = env.observation_space.spaces["desired_goal"].shape[0]
 
     agent = DDPG(action_number, state_number, action_bound, goal_number)
+    # agent.save_weight_2_file()
+    # agent.save_results(0)
+    # now = datetime.now()
+    # print("[DEBUG]save org agent done {} {}".format(now.strftime("%m/%d/%Y, %H:%M:%S"), 0))
 
     if PLAY_MODEL == True:
         now = datetime.now()
@@ -420,16 +478,25 @@ if __name__ == '__main__':
         episode = generate_episode(agent, env)
         agent.store_2_replay_buffer(episode)
 
+    if CONTINUE_TRAIN:
+        agent.load_results()
     # 训练部分
     for train_cycle in range(TRAIN_CYCLES):
         now = datetime.now() # 统计时间
         print("[DEBUG]TRAIN_CYCLES {} {}".format(now.strftime("%m/%d/%Y, %H:%M:%S"), train_cycle))
 
-        episode = generate_episode(agent, env)
-        agent.store_2_replay_buffer(episode)
-        for _ in range(EACH_TRAIN_UPDATE_TIME):
-            agent.train(env)
+        for _ in range(ADD_NEW_EPISODE):
+            episode = generate_episode(agent, env)
+            agent.store_2_replay_buffer(episode)
 
+        a_loss = 0
+        c_loss = 0
+        for _ in range(EACH_TRAIN_UPDATE_TIME):
+            a, c = agent.train(env)
+            a_loss += a
+            c_loss += c
+        print("[DEBUG]cycle = {},a_loss = {}, c_loss = {}".format(train_cycle, a_loss / EACH_TRAIN_UPDATE_TIME, c_loss/ EACH_TRAIN_UPDATE_TIME))
+        # agent.save_weight_2_file()
         agent.sync_network()
         # store agent train results
         agent.save_results(train_cycle)
