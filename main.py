@@ -6,7 +6,7 @@ from copy import deepcopy
 import matplotlib.pyplot as plt
 import numpy as np
 import tensorflow as tf
-
+from keras import backend as K
 from tensorflow import keras
 from keras.models import Sequential, Model
 from keras.layers import Input, Dense, Concatenate, Lambda
@@ -23,17 +23,17 @@ from normalizer import Normalizer
 ENV_NAME = 'FetchPickAndPlace-v1'
 RANDOMSEED = 1                             # random seed
 
-LEARNING_RATE_A = 0.001                    # learning rate for actor
-LEARNING_RATE_C = 0.001                    # learning rate for critic
+LEARNING_RATE_A = 0.01                    # learning rate for actor
+LEARNING_RATE_C = 0.01                    # learning rate for critic
 GAMMA = 0.9                                # reward discount
 TAU = 0.05                                 # soft replacement
 BATCH_SIZE = 256                           # update batchsize
-TRAIN_CYCLES = 1000                        # MAX training times
+TRAIN_CYCLES = 50                          # MAX training times
 EACH_TRAIN_UPDATE_TIME = 50                # every time TRAIN update time
-PRE_FILL_EPISODES = 300                    # number of episodes for training
+PRE_FILL_EPISODES = 2                      # number of episodes for training
 MAX_EPISODE_STEPS = 50                     # number of steps for each episode
 MEMORY_CAPACITY = 7e+5 // 50               # replay buffer size
-TEST_EPISODES = 5                          # test the model per episodes
+TEST_EPISODES = 10                         # test the model per episodes
 ACTION_VARIANCE = 3                        # control exploration
 MAX_TEST_STEPS = 100                       # TRAIN steps
 ADD_NEW_EPISODE = 2
@@ -48,15 +48,6 @@ P_FUTURE = 1 - (1. / (1 + K_FUTURE))
 ##########################################################################################################
 # Base Class
 ##########################################################################################################
-# class Normalizer(object):
-#     def __init__(self, range):
-#         pass
-#
-#     def update(self):
-#         pass
-#
-#     def normalize(self):
-#         pass
 
 ##########################################################################################################
 # Agent class
@@ -84,10 +75,10 @@ class DDPG(object):
 
         # 建立actor_target网络，并和actor参数一致，不能训练
         self.__copy_para(self.actor, self.actor_target)
-        self.__set_model_2_eval_model(self.actor_target)
+        # self.__set_model_2_eval_model(self.actor_target)
 
         self.__copy_para(self.critic, self.critic_target)
-        self.__set_model_2_eval_model(self.critic_target)
+        # self.__set_model_2_eval_model(self.critic_target)
 
         self.actor_opt = tf.keras.optimizers.Adam(LEARNING_RATE_A)
         self.critic_opt = tf.keras.optimizers.Adam(LEARNING_RATE_C)
@@ -119,8 +110,8 @@ class DDPG(object):
         i_state = Input(shape=(self.state_number))
         i_action = Input(shape=(self.action_number))
         i_goal = Input(shape=(self.goal_number))
-        input = Concatenate()([i_state, i_action, i_goal])
-        fc1 = Dense(units=256, activation="relu")(input)
+        input_l = Concatenate()([i_state, i_action, i_goal])
+        fc1 = Dense(units=256, activation="relu")(input_l)
         fc2 = Dense(units=256, activation="relu")(fc1)
         fc3 = Dense(units=256, activation="relu")(fc2)
         output = Dense(units=1)(fc3)
@@ -128,14 +119,6 @@ class DDPG(object):
         # model.summary()
         # plot_model(model, show_shapes=True)
         return model
-
-    def __set_model_2_eval_model(self, model):
-        for layer in model.layers:
-            layer.trainable = False
-
-    def __set_model_2_train_model(self, model):
-        for layer in model.layers:
-            layer.trainable = True
 
     # 更新参数
     def __copy_para(self, from_model, to_model):
@@ -177,8 +160,108 @@ class DDPG(object):
         action = np.array(a[0])
 
         return action
+    def choose_action_print_all_process(self, state, goal):
+        state = self.state_normalizer.normalize(state)
+        goal = self.goal_normalizer.normalize(goal)
+        state = state.reshape((1, -1))
+        goal  = goal.reshape((1, -1))
 
-    def save_results(self, epoch):
+        action = self.actor([state, goal])
+
+        inp = self.actor.input  # input placeholder
+        outputs = [layer.output for layer in self.actor.layers]  # all layer outputs
+        functors = [K.function([inp], [out]) for out in outputs] # evaluation function
+        # Testing
+        layer_outs = [func([state, goal]) for func in functors]
+        # layer_outs = functor([state, goal])
+        # print(layer_outs)
+
+        fc3_out = np.array(layer_outs[5][0])
+        w_fc3 = np.array(self.actor.trainable_weights[6])
+        b_fc3 = np.array(self.actor.trainable_weights[7])
+
+        a_1 = np.sum(fc3_out * w_fc3[:, 0]) + b_fc3[0]
+        a_2 = np.sum(fc3_out * w_fc3[:, 1]) + b_fc3[1]
+        a_3 = np.sum(fc3_out * w_fc3[:, 2]) + b_fc3[2]
+        a_4 = np.sum(fc3_out * w_fc3[:, 3]) + b_fc3[3]
+
+        action = np.array(action[0])
+
+        return action
+
+    #
+    # def save_results(self, epoch):
+    #     now = datetime.now()  # current date and time
+    #     date_time = now.strftime("%Y-%m-%d %H:%M:%S.%f")
+    #     model_checkpoint_folder = self.get_result_folders()
+    #
+    #     filepaths = {}
+    #     for key, model_path in model_checkpoint_folder.items():
+    #         filepaths[key] = os.path.join(model_path, "model-epoch_{:04d}_{}.hdf5".format(epoch, date_time))
+    #
+    #     self.actor.save_weights(filepaths['actor'])
+    #     self.critic.save_weights(filepaths['critic'])
+    #
+    #     for key, model_folder in model_checkpoint_folder.items():
+    #         self.delete_expire_file(model_folder)
+    #
+    #     # torch.save({"actor_state_dict": self.actor.state_dict(),  #             "state_normalizer_mean": self.state_normalizer.mean,  #             "state_normalizer_std": self.state_normalizer.std,  #             "goal_normalizer_mean": self.goal_normalizer.mean,  #             "goal_normalizer_std": self.goal_normalizer.std}, "FetchPickAndPlace.pth")
+    #
+    # def get_result_folders(self):
+    #     checkpoint_folder = './checkpoints'
+    #     models = ['actor', 'critic']
+    #     if not os.path.exists(checkpoint_folder):
+    #         os.makedirs(checkpoint_folder)
+    #
+    #     model_checkpoint_folder = {}
+    #     for model in models:
+    #         model_folder = os.path.join(checkpoint_folder, model)
+    #         model_checkpoint_folder[model] = model_folder
+    #         if not os.path.exists(model_folder):
+    #             os.makedirs(model_folder)
+    #     return model_checkpoint_folder
+    #
+    # def delete_expire_file(self, model_folder, num_file_limit=10):
+    #     files = os.listdir(model_folder)
+    #     file_dts_idx = self.folder_file_sort(files)
+    #     if len(files) > num_file_limit:
+    #         for i in range(len(files)):
+    #             if file_dts_idx[i] < (len(files) - num_file_limit):
+    #                 os.remove(os.path.join(model_folder, files[i]))
+    #
+    # def folder_file_sort(self, files):
+    #     file_dts = []
+    #     for file_name in files:
+    #         file_dts.append(datetime.strptime(file_name[-31:-5], '%Y-%m-%d %H:%M:%S.%f').timestamp())
+    #     file_dts = np.array(file_dts)
+    #     file_dts_idx = np.argsort(file_dts)
+    #     return file_dts_idx
+    #
+    # def load_results(self):
+    #     model_checkpoint_folder = self.get_result_folders()
+    #     for key, model_folder in model_checkpoint_folder.items():
+    #         files = os.listdir(model_folder)
+    #         file_dts_idx = self.folder_file_sort(files)
+    #         max_id = np.argmax(file_dts_idx)
+    #         if key == 'actor':
+    #             self.actor.load_weights(os.path.join(model_folder, files[max_id]))
+    #         elif key == 'critic':
+    #             self.critic.load_weights(os.path.join(model_folder, files[max_id]))
+    #
+    #     # checkpoint = torch.load("FetchPickAndPlace.pth")
+    #     # actor_state_dict = checkpoint["actor_state_dict"]
+    #     # self.actor.load_state_dict(actor_state_dict)
+    #     # state_normalizer_mean = checkpoint["state_normalizer_mean"]
+    #     # self.state_normalizer.mean = state_normalizer_mean
+    #     # state_normalizer_std = checkpoint["state_normalizer_std"]
+    #     # self.state_normalizer.std = state_normalizer_std
+    #     # goal_normalizer_mean = checkpoint["goal_normalizer_mean"]
+    #     # self.goal_normalizer.mean = goal_normalizer_mean
+    #     # goal_normalizer_std = checkpoint["goal_normalizer_std"]
+    #     # self.goal_normalizer.std = goal_normalizer_std
+    #     pass
+
+    def save(self, epoch):
         now = datetime.now()  # current date and time
         date_time = now.strftime("%Y-%m-%d %H:%M:%S.%f")
         model_checkpoint_folder = self.get_result_folders()
@@ -193,7 +276,16 @@ class DDPG(object):
         for key, model_folder in model_checkpoint_folder.items():
             self.delete_expire_file(model_folder)
 
-        # torch.save({"actor_state_dict": self.actor.state_dict(),  #             "state_normalizer_mean": self.state_normalizer.mean,  #             "state_normalizer_std": self.state_normalizer.std,  #             "goal_normalizer_mean": self.goal_normalizer.mean,  #             "goal_normalizer_std": self.goal_normalizer.std}, "FetchPickAndPlace.pth")
+    def reload(self):
+        model_checkpoint_folder = self.get_result_folders()
+        for key, model_folder in model_checkpoint_folder.items():
+            files = os.listdir(model_folder)
+            file_dts_idx = self.folder_file_sort(files)
+            max_id = file_dts_idx[-1]
+            if key == 'actor':
+                self.actor.load_weights(os.path.join(model_folder, files[max_id]))
+            elif key == 'critic':
+                self.critic.load_weights(os.path.join(model_folder, files[max_id]))
 
     def get_result_folders(self):
         checkpoint_folder = './checkpoints'
@@ -213,9 +305,9 @@ class DDPG(object):
         files = os.listdir(model_folder)
         file_dts_idx = self.folder_file_sort(files)
         if len(files) > num_file_limit:
-            for i in range(len(files)):
-                if file_dts_idx[i] < (len(files) - num_file_limit):
-                    os.remove(os.path.join(model_folder, files[i]))
+            for i, idx in enumerate(file_dts_idx):
+                if i < (len(files) - num_file_limit):
+                    os.remove(os.path.join(model_folder, files[idx]))
 
     def folder_file_sort(self, files):
         file_dts = []
@@ -224,30 +316,6 @@ class DDPG(object):
         file_dts = np.array(file_dts)
         file_dts_idx = np.argsort(file_dts)
         return file_dts_idx
-
-    def load_results(self):
-        model_checkpoint_folder = self.get_result_folders()
-        for key, model_folder in model_checkpoint_folder.items():
-            files = os.listdir(model_folder)
-            file_dts_idx = self.folder_file_sort(files)
-            max_id = np.argmax(file_dts_idx)
-            if key == 'actor':
-                self.actor.load_weights(os.path.join(model_folder, files[max_id]))
-            elif key == 'critic':
-                self.critic.load_weights(os.path.join(model_folder, files[max_id]))
-
-        # checkpoint = torch.load("FetchPickAndPlace.pth")
-        # actor_state_dict = checkpoint["actor_state_dict"]
-        # self.actor.load_state_dict(actor_state_dict)
-        # state_normalizer_mean = checkpoint["state_normalizer_mean"]
-        # self.state_normalizer.mean = state_normalizer_mean
-        # state_normalizer_std = checkpoint["state_normalizer_std"]
-        # self.state_normalizer.std = state_normalizer_std
-        # goal_normalizer_mean = checkpoint["goal_normalizer_mean"]
-        # self.goal_normalizer.mean = goal_normalizer_mean
-        # goal_normalizer_std = checkpoint["goal_normalizer_std"]
-        # self.goal_normalizer.std = goal_normalizer_std
-        pass
 
     def train(self, env):
         # 1. reward reshape 和 goal 选取
@@ -273,12 +341,6 @@ class DDPG(object):
             next_states.append(deepcopy(self.replay_buffer[episode][timestep][4]))
             next_achieved_goal.append(deepcopy(self.replay_buffer[episode][timestep][5]))
             achieved_goal.append(deepcopy(self.replay_buffer[episode][timestep][6]))
-
-        states = self.state_normalizer.normalize(states)
-        desired_goals = self.goal_normalizer.normalize(desired_goals)
-        next_states = self.state_normalizer.normalize(next_states)
-        next_achieved_goal = self.goal_normalizer.normalize(next_achieved_goal)
-        achieved_goal = self.goal_normalizer.normalize(achieved_goal)
 
         states = np.vstack(states)
         actions = np.vstack(actions)
@@ -310,34 +372,50 @@ class DDPG(object):
         next_states = self.__clip_obs(next_states)
         desired_goals = self.__clip_obs(desired_goals)
 
+        states = np.vstack(states)
+        actions = np.vstack(actions)
+        desired_goals = np.vstack(desired_goals)
+        next_achieved_goal = np.vstack(next_achieved_goal)
+        next_states = np.vstack(next_states)
+        achieved_goal = np.vstack(achieved_goal)
+
+        states = self.state_normalizer.normalize(states)
+        next_states = self.state_normalizer.normalize(next_states)
+        desired_goals = self.goal_normalizer.normalize(desired_goals)
+        next_achieved_goal = self.goal_normalizer.normalize(next_achieved_goal)
+        achieved_goal = self.goal_normalizer.normalize(achieved_goal)
+
         # 2. 更新
         # Critic：
         # Critic更新和DQN很像，不过target不是argmax了，是用critic_target计算出来的。
         # br + GAMMA * q_
         # loss = (y - q)^2
+        action_next = self.actor_target([next_states, desired_goals])
+        # action_next = np.clip(np.random.normal(action_next, ACTION_VARIANCE), self.action_bound[0],
+        #                       self.action_bound[1])
+        q_value_t = self.critic_target([next_states, action_next, desired_goals])
+        y = rewards + self.gamma * q_value_t
+        y = np.clip(y, -1 / (1 - self.gamma), 0)
         with tf.GradientTape() as tape:
-            action_next = self.actor_target([next_states, desired_goals], training=False)
-            # action_next = np.clip(np.random.normal(action_next, ACTION_VARIANCE), self.action_bound[0],
-            #                       self.action_bound[1])
-            q_value_next = self.critic_target([next_states, action_next, desired_goals], training=False)
-            y = rewards + self.gamma * q_value_next
-
             q_value = self.critic([states, actions, desired_goals])
             td_error = tf.losses.mean_squared_error(y, q_value)
         c_grads = tape.gradient(td_error, self.critic.trainable_weights)
-        self.critic_opt.apply_gradients(zip(c_grads, self.critic.trainable_weights))
 
         # Actor：
         # Actor的目标就是获取最多Q值的。
         # Exception
         with tf.GradientTape() as tape:
-            action = self.actor([states, desired_goals], training=False)
-            # action = np.clip(np.random.normal(action, ACTION_VARIANCE), self.action_bound[0], self.action_bound[1])
-            q_value = self.critic([states, action, desired_goals], training=False)
-            a_loss = -tf.reduce_mean(q_value) + np.mean(np.array(action) ** 2)
+            action = self.actor([states, desired_goals])
+            q_value = self.critic([states, action, desired_goals])
+            a_loss = -tf.math.reduce_mean(q_value) + tf.math.reduce_mean(action ** 2)
+            # a_loss = -q_value
             # a_loss = -np.mean(self.critic([states, action, desired_goals]))
             # a_loss += (np.array(action[0]) ** 2).mean()
         a_grads = tape.gradient(a_loss, self.actor.trainable_weights)
+        # self.old_a_grads = np.array(a_grads)
+
+
+        self.critic_opt.apply_gradients(zip(c_grads, self.critic.trainable_weights))
         self.actor_opt.apply_gradients(zip(a_grads, self.actor.trainable_weights))
 
         c_error = np.mean(td_error)
@@ -345,15 +423,22 @@ class DDPG(object):
         return c_error, a_error
 
 
+
     def sync_network(self):
         """
         滑动平均更新
         """
         # 其实和之前的硬更新类似，不过在更新赋值之前，用一个ema.average。
-        paras = self.actor.trainable_weights + self.critic.trainable_weights  # 获取要更新的参数包括actor和critic的
-        self.ema.apply(paras)  # 主要是建立影子参数, update shadow_variables
-        for i, j in zip(self.actor_target.trainable_weights + self.critic_target.trainable_weights, paras):
-            i.assign(self.ema.average(j))  # 用滑动平均赋值
+        # paras = self.actor.trainable_weights + self.critic.trainable_weights  # 获取要更新的参数包括actor和critic的
+        # self.ema.apply(paras)  # 主要是建立影子参数, update shadow_variables
+        # for i, j in zip(self.actor_target.trainable_weights + self.critic_target.trainable_weights, paras):
+        #     i.assign(self.ema.average(j))  # 用滑动平均赋值
+
+        for (a, b) in zip(self.actor_target.trainable_weights, self.actor.trainable_weights):
+            a.assign(b * TAU + a * (1 - TAU))
+
+        for (a, b) in zip(self.critic_target.trainable_weights, self.critic.trainable_weights):
+            a.assign(b * TAU + a * (1 - TAU))
 
     def update_normallizer(self):
         episode_indices = np.random.randint(0, len(self.replay_buffer), BATCH_SIZE)
@@ -437,8 +522,36 @@ def generate_episode(agent, env):
         desired_goal = next_desired_goal.copy()
     return episode
 
+# test agent
+def evalute_model(agent, env):
+
+    now = datetime.now()
+    print("[DEBUG]test agent {} {}".format(now.strftime("%m/%d/%Y, %H:%M:%S"), train_cycle))
+    env_dict = env.reset()
+    state = env_dict["observation"]
+    achieved_goal = env_dict["achieved_goal"]
+    desired_goal = env_dict["desired_goal"]
+    while np.linalg.norm(achieved_goal - desired_goal) <= 0.05:
+        env_dict = env.reset()
+        state = env_dict["observation"]
+        achieved_goal = env_dict["achieved_goal"]
+        desired_goal = env_dict["desired_goal"]
+
+    while True:
+        env.render()
+        state = env_dict["observation"]
+        desired_goal = env_dict["desired_goal"]
+        action = agent.choose_action(state, desired_goal)
+
+        env_dict, _, done, _ = env.step(action)
+
+        if done:
+            break
+    # env.close()
+
 
 if __name__ == '__main__':
+
 
     # 初始化环境
     env = gym.make(ENV_NAME)
@@ -455,22 +568,36 @@ if __name__ == '__main__':
     # now = datetime.now()
     # print("[DEBUG]save org agent done {} {}".format(now.strftime("%m/%d/%Y, %H:%M:%S"), 0))
 
-    if PLAY_MODEL == True:
-        now = datetime.now()
-        print("[DEBUG]test agent {} {}".format(now.strftime("%m/%d/%Y, %H:%M:%S"), 0))
+    if PLAY_MODEL:
+
         test_count = 0
-        agent.load_results()
+        agent.reload()
         while TEST_EPISODES > test_count:
             test_count += 1
+            now = datetime.now()
+            print("[DEBUG]test agent {} {}".format(now.strftime("%m/%d/%Y, %H:%M:%S"), test_count))
             env_dict = env.reset()
+            old_distance = 100
+            move_close = 0
+            move_away = 0
             for i in range(MAX_TEST_STEPS):
                 env.render()
                 state = env_dict["observation"]
                 achieved_goal = env_dict["achieved_goal"]
                 desired_goal = env_dict["desired_goal"]
-                env_dict, _, done, _ = env.step(agent.choose_action(state, desired_goal))
+                action = agent.choose_action_print_all_process(state, desired_goal)
+
+                a = np.array(achieved_goal)
+                b = np.array(desired_goal)
+                distance = np.sqrt(np.sum((a-b)**2))
+                move_close += distance < old_distance
+                move_away += distance > old_distance
+                old_distance = distance
+
+                env_dict, _, done, _ = env.step(action)
                 if done:
                     break
+            print("[DEBUG]Distance close {}  away {}".format(move_close, move_away))
         exit()
 
     # pre-fill replay-buffer
@@ -479,40 +606,47 @@ if __name__ == '__main__':
         agent.store_2_replay_buffer(episode)
 
     if CONTINUE_TRAIN:
-        agent.load_results()
+        agent.reload()
     # 训练部分
-    for train_cycle in range(TRAIN_CYCLES):
-        now = datetime.now() # 统计时间
-        print("[DEBUG]TRAIN_CYCLES {} {}".format(now.strftime("%m/%d/%Y, %H:%M:%S"), train_cycle))
+    for epoch in range(10):
+        now = datetime.now()  # 统计时间
+        print("[DEBUG]TRAIN_EPOCH {} {}".format(now.strftime("%m/%d/%Y, %H:%M:%S"), epoch))
+        for train_cycle in range(TRAIN_CYCLES):
+            for _ in range(ADD_NEW_EPISODE):
+                episode = generate_episode(agent, env)
+                agent.store_2_replay_buffer(episode)
 
-        for _ in range(ADD_NEW_EPISODE):
-            episode = generate_episode(agent, env)
-            agent.store_2_replay_buffer(episode)
+            a_loss = 0
+            c_loss = 0
+            for _ in range(EACH_TRAIN_UPDATE_TIME):
+                a, c = agent.train(env)
+                a_loss += a
+                c_loss += c
+            # print("[DEBUG]cycle = {},a_loss = {}, c_loss = {}".format(train_cycle, a_loss / EACH_TRAIN_UPDATE_TIME, c_loss/ EACH_TRAIN_UPDATE_TIME))
+            # t_a_w = agent.actor_target.get_weights()
+            # t_c_w = agent.critic_target.get_weights()
+            # a_w = agent.actor.get_weights()
+            # c_w = agent.critic.get_weights()
+            #
+            # a_rate = []
+            # for i in range(len(t_a_w)):
+            #     a_rate.append(np.array(a_w[i]) / np.array(t_a_w[i]))
+            #
+            # c_rate = []
+            # for i in range(len(t_c_w)):
+            #     c_rate.append(np.array(c_w[i]) / np.array(t_c_w[i]))
+            #
+            # print("[DEBUG]update rate a = {}, c = {}".format(a_rate, c_rate))
 
-        a_loss = 0
-        c_loss = 0
-        for _ in range(EACH_TRAIN_UPDATE_TIME):
-            a, c = agent.train(env)
-            a_loss += a
-            c_loss += c
-        print("[DEBUG]cycle = {},a_loss = {}, c_loss = {}".format(train_cycle, a_loss / EACH_TRAIN_UPDATE_TIME, c_loss/ EACH_TRAIN_UPDATE_TIME))
-        # agent.save_weight_2_file()
-        agent.sync_network()
-        # store agent train results
-        agent.save_results(train_cycle)
+            # agent.save_weight_2_file()
+            agent.sync_network()
+            # store agent train results
+            agent.save(train_cycle)
+            # if train_cycle % 100 == 0:
+            #     evalute_model(agent, env)
 
     # test agent
-    now = datetime.now()
-    print("[DEBUG]test agent {} {}".format(now.strftime("%m/%d/%Y, %H:%M:%S"), train_cycle))
     test_count = 0
     while TEST_EPISODES > test_count:
         test_count += 1
-        env_dict = env.reset()
-        for i in range(MAX_TEST_STEPS):
-            env.render()
-            state = env_dict["observation"]
-            achieved_goal = env_dict["achieved_goal"]
-            desired_goal = env_dict["desired_goal"]
-            env_dict, _, done, _ = env.step(agent.choose_action(state, desired_goal))
-            if done:
-                break
+        evalute_model(agent, env)
